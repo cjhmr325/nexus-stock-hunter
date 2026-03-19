@@ -1,0 +1,309 @@
+import os
+import json
+import gspread
+import yfinance as yf
+import numpy as np
+import pandas as pd
+import time
+from datetime import datetime
+from google.oauth2.service_account import Credentials
+
+# --- [인증 로직 통합본] ---
+def get_gspread_client():
+    # 1. GitHub Actions 환경 확인 (Secret 변수 존재 여부)
+    json_creds = os.environ.get('GOOGLE_SHEETS_JSON')
+    
+    if json_creds:
+        print("🌐 GitHub Actions 환경에서 인증을 시도합니다...")
+        creds_dict = json.loads(json_creds)
+    else:
+        # 2. 로컬 VS Code 환경 확인
+        # 파일명을 'secret_key.json'으로 통일했습니다.
+        key_filename = 'secret_key.json' 
+        
+        # 파일이 실제로 존재하는지 체크 (경로 오류 방지)
+        if not os.path.exists(key_filename):
+            print(f"❌ 에러: {key_filename} 파일이 폴더에 없습니다.")
+            print("💡 해결책: 다운로드한 JSON 파일의 이름을 'secret_key.json'으로 바꾸고 파이썬 파일과 같은 폴더에 넣으세요.")
+            raise FileNotFoundError(f"{key_filename} missing.")
+            
+        print(f"💻 로컬 환경({key_filename})에서 인증을 시도합니다...")
+        with open(key_filename, 'r', encoding='utf-8') as f:
+            creds_dict = json.load(f)
+
+    # Google 서비스 계정 권한 설정
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    return gspread.authorize(creds)
+
+# [실제 실행부]
+try:
+    gc = get_gspread_client()
+    sh = gc.open("dashboard_v2")
+    print("✅ 시트 연결 성공! 사냥을 시작합니다.")
+except Exception as e:
+    print(f"🚨 연결 실패: {e}")
+    print("💡 팁: 시트 공유 설정에서 서비스 계정 이메일을 '편집자'로 추가했는지 확인하세요.")
+    raise
+
+# 1. 대상 시트 그룹 설정
+index_sheets = ["Liquidity", "Gravity", "Resistance", "Stress"]
+raw_sheets = ["DB_Raw_Price", "DB_Raw_MarketCap", "DB_Raw_Vol", "DB_Raw_High", "DB_Raw_Low", "DB_Raw_PriceOpen", "DB_Raw_Closeyest"]
+calc_sheets = ["EPI_History", "Resist_History", "Vector_History","Pressure_History"]
+all_ws_names = index_sheets + raw_sheets + calc_sheets
+sheets = {}
+for name in all_ws_names:
+    try:
+        sheets[name] = sh.worksheet(name)
+        time.sleep(0.2)
+    except:
+        print(f"⚠️ {name} 시트 누락")
+
+
+# --- [날짜 동기화 로직] ---
+def sync_sheet_dates(target_sheets, date_index):
+    formatted_dates = [d.strftime('%Y-%m-%d') for d in reversed(date_index)]
+    for name, ws in target_sheets.items():
+        limit = 250 if name in index_sheets else 45
+        date_payload = formatted_dates[:limit]
+        end_col_a1 = gspread.utils.rowcol_to_a1(1, limit + 1)
+        ws.update([date_payload], f'B1:{end_col_a1}')
+        time.sleep(1.5)
+    print(f"📅 총 {len(target_sheets)}개 시트 날짜 동기화 완료")
+
+# --- [데이터 수집 및 계산 시작] ---
+ws_config = sh.worksheet("Config_Settings")
+tickers = [t.strip() for t in ws_config.col_values(1)[1:] if t.strip()]
+payloads = {name: [] for name in all_ws_names}
+master_date_index = None
+
+for ticker in tickers:
+    try:
+        # 1. 데이터 다운로드
+        df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # 2. [날짜 밀림 방지] 오늘 장중 데이터면 삭제하여 어제 종가를 B열에 맞춤
+        #if not df.empty and df.index[-1].date() == datetime.now().date():
+         #   df = df.iloc[:-1]
+
+        if master_date_index is None: master_date_index = df.index
+
+        # 3. 엑셀 수식용 기초 데이터 추출
+        close = df['Close']
+        high, low, opens, vol = df['High'], df['Low'], df['Open'], df['Volume']
+        close_yest = close.shift(1)
+
+        tk_obj = yf.Ticker(ticker)
+        shares = tk_obj.info.get('sharesOutstanding', 0)
+
+        if df.empty or len(df) < 50:
+            for name in all_ws_names:
+                limit = 250 if name in index_sheets else 45
+                payloads[name].append([0] * limit)
+            continue
+
+
+
+        # --- [A. 4대 지표 로직 계산] ---
+        val = close * vol
+        diff = close.diff().fillna(0)
+
+        # 1) Liquidity (유동성 에너지): 대금(val) * 수익률(diff / 어제가격)
+        # df_price.shift(1)은 엑셀의 C2(Yesterday Price)와 동일함
+        liq_energy = val * (diff / close.shift(1))
+        # 무한대(inf)나 결측치(NaN) 처리 후 리스트화 (엑셀의 IFERROR 역할)
+        liq_list = liq_energy.replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
+        # 2) Gravity (중력 저항): (현재가 / 21일 장중고점) - 1
+        # 엑셀: DB_Raw_Price!B2 / MAX(DB_Raw_High!B2:V2) - 1
+        max_high_21 = high.rolling(window=21).max()
+        grav_list = ((close / max_high_21) - 1).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
+        # 3) Resistance (상대적 위치): (현재 - 20일저점) / (20일고점 - 20일저점)
+        # 엑셀: (Price - MIN(Low)) / (MAX(High) - MIN(Low))
+        r_max = high.rolling(window=20).max()
+        r_min = low.rolling(window=20).min()
+        res_range = (r_max - r_min).replace(0, np.nan)
+        res_list = ((close - r_min) / res_range).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
+        # 4) Stress (시스템 민감도): LOG10(((변동률) / (대금)) * 10^15)
+        # 엑셀: LOG10(((ABS(B2-C2)/C2) / (Vol*Price)) * 10^15)
+        ret_abs = (diff.abs() / close.shift(1))
+        raw_stress = (ret_abs / val) * (10**15)
+        strss_list = np.log10(raw_stress.replace(0, np.nan)).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
+        # 지표 데이터 할당 (250일 기준)
+        index_data = {
+            "Liquidity": liq_list,
+            "Gravity": grav_list,
+            "Resistance": res_list,
+            "Stress": strss_list
+        }
+        for name in index_sheets:
+            d = index_data[name][:250]
+            payloads[name].append(d + [0]*(250-len(d)))
+
+
+
+        # [B열~G열] 테스트 코드에서 검증된 역순 head(45) 방식
+        rev_close = close.iloc[::-1]
+        rev_close_yest = close.shift(1).iloc[::-1]
+
+        payloads["DB_Raw_Price"].append(rev_close.head(45).tolist())
+        payloads["DB_Raw_Closeyest"].append(rev_close_yest.head(45).fillna(0).tolist())
+        payloads["DB_Raw_PriceOpen"].append(opens.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_High"].append(high.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_Low"].append(low.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_Vol"].append(vol.iloc[::-1].head(45).tolist())
+
+        # [마켓캡] 예외처리 포함
+        mcap_vals = (close * (shares if shares > 0 else 0)).iloc[::-1].head(45).fillna(0).tolist()
+        payloads["DB_Raw_MarketCap"].append(mcap_vals)
+
+
+        # --- [EPI & 히스토리 45일 전체 계산 루프] ---
+        # 상장주식수 안전 장치
+        e2_shares = shares if shares > 0 else 1
+
+        epi_history_45 = []
+        resist_history_45 = []
+        vector_history_45 = []
+        pressure_history_45 = []
+
+        for i in range(45):
+            try:
+                # 과거 시점 슬라이싱 (i=0이면 오늘까지의 전체 데이터)
+                target_df = df if i == 0 else df.iloc[:-i]
+
+                if len(target_df) < 50: # 최소 데이터 확보 확인
+                    raise ValueError("Insufficient data")
+
+                # 1. 해당 시점의 기준 데이터 추출
+                curr = target_df.iloc[-1]
+
+                # [변수 원복] 시트 수식과 1:1 매칭되는 변수명
+                b2_close = curr['Close']
+                b2_open = curr['Open']
+                b2_high = curr['High']
+                b2_low = curr['Low']
+                b2_vol = curr['Volume']
+
+                # 1. [신규 추가] Pressure 로직 (전조 증상 지표)
+                avg_vol_45 = target_df['Volume'].iloc[-45:].mean()
+                rel_vol = b2_vol / avg_vol_45 if avg_vol_45 != 0 else 0
+
+                denom = (b2_high - b2_low) + 0.001
+                up_force = (b2_close - b2_low) / denom
+                down_force = (b2_high - b2_close) / denom
+
+                # [사용자 제공 EPI 수식 그대로 구현]
+                # Relative_Vol: 당일 거래량 / 45일 평균 거래량
+                avg_vol_45 = target_df['Volume'].iloc[-45:].mean()
+                relative_vol = b2_vol / avg_vol_45 if avg_vol_45 != 0 else 0
+
+                # Up_Force, Down_Force
+                denom = (b2_high - b2_low) + 0.001
+                up_force = (b2_close - b2_low) / denom
+                down_force = (b2_high - b2_close) / denom
+
+                # Pressure & Net_Thrust
+                pressure = up_force + down_force  # 결과적으로 거의 1
+                net_thrust = relative_vol * (up_force - down_force)
+
+                # 최종 EPI 값 (AM열에 들어가는 값)
+                epi_val = net_thrust * pressure
+
+                # 2. [기본 로직 원복] 이동평균 및 표준편차
+                r20_prices = target_df['Close'].iloc[-20:]
+                r5_prices = target_df['Close'].iloc[-5:]
+                avg20 = r20_prices.mean()
+                avg5 = r5_prices.mean()
+                std20 = r20_prices.std(ddof=1)
+                std5 = r5_prices.std(ddof=1)
+                std_ratio = std5 / std20 if std20 != 0 else 0
+
+                # 3. [기본 로직 원복] 추진력 및 저항 인자
+                s2 = (b2_close / b2_open) - 1
+                t2 = ((b2_close / avg5) - 1) * std_ratio
+                u2 = ((b2_close / avg20) - 1) * std_ratio
+
+                v_eff_deno = b2_vol / e2_shares
+                v_efficiency = s2 / v_eff_deno if v_eff_deno != 0 else 0
+                weighted_thrust = (s2 * 0.5) + (t2 * 0.3) + (u2 * 0.2)
+
+
+                # 4. 개별 저항 인자 (X, Y, Z, AA, AB)
+                x2_drag = (s2 ** 2) * std5
+                y2_elastic = abs((b2_close / avg20) - 1)
+                z2_friction = v_eff_deno
+
+                mcap_now = b2_close * e2_shares
+                aa2_inertia = np.log10(mcap_now) if mcap_now > 0 else 0
+
+                high_45_avg = target_df['High'].iloc[-45:].mean()
+                low_45_avg = target_df['Low'].iloc[-45:].mean()
+                ab2_amplitude = (high_45_avg - low_45_avg) / (b2_high - b2_low + 0.001)
+
+                # 4. [기본 로직 원복] AC 통합 저항 및 AN 최종 벡터
+                combined_factor = (1 + y2_elastic) * (1 + z2_friction) * (1 + x2_drag)
+                ac_input = 1 + (combined_factor * ab2_amplitude * (aa2_inertia / 10))
+                ac_total = np.log10(ac_input) if ac_input > 0 else 0
+
+                # 6. AN 최종 가속 벡터 산출 (Nexus Logic 적용: 분모 1+AC)
+                weighted_thrust = (s2 * 0.5) + (t2 * 0.3) + (u2 * 0.2)
+                final_an = (weighted_thrust * v_efficiency) / (1 + ac_total)
+
+                # 결과값 리스트에 순차적으로 추가 (B열부터 AS열 방향)
+                epi_history_45.append(round(epi_val, 12))        # EPI 시트용
+                resist_history_45.append(round(ac_total, 10))    # Resist 시트용
+                vector_history_45.append(round(final_an, 12))     # Vector 시트용
+                pressure_history_45.append(round(net_thrust, 12)) # Pressure 시트용
+
+            except Exception as e:
+                epi_history_45.append(0); resist_history_45.append(0)
+                vector_history_45.append(0); pressure_history_45.append(0)
+
+        # 7. 페이로드 할당 (각 시트 이름에 맞춰 전송 데이터 구성)
+        payloads["EPI_History"].append(epi_history_45)
+        payloads["Resist_History"].append(resist_history_45)
+        payloads["Vector_History"].append(vector_history_45)
+        payloads["Pressure_History"].append(pressure_history_45)
+
+
+
+        print(f"✅ {ticker} 분석 완료")
+        time.sleep(0.05)
+
+
+
+    except Exception as e:
+        print(f"❌ {ticker} 오류: {e}")
+        for name in all_ws_names:
+            limit = 250 if name in index_sheets else 45
+            payloads[name].append([0] * limit)
+
+# 3. 날짜 및 데이터 일괄 업데이트
+if master_date_index is not None:
+    sync_sheet_dates(sheets, master_date_index)
+
+# 마지막 업데이트 루프 부분 보완
+for name in all_ws_names:
+    if name not in sheets: continue
+    data = payloads[name]
+
+    # 1. 티커 업데이트
+    sheets[name].update([[t] for t in tickers], f'A2:A{len(tickers)+1}')
+
+    # 2. 데이터 업데이트
+    limit = 250 if name in index_sheets else 45
+    end_col_a1 = gspread.utils.rowcol_to_a1(len(data) + 1, limit + 1)
+    sheets[name].update(data, f'B2:{end_col_a1}')
+
+    print(f"✨ {name} 데이터 수송 완료")
+    time.sleep(1)  # <--- 시트 하나 끝날 때마다 1초만 쉬어주면 안전합니다.
