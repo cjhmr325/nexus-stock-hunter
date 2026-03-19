@@ -26,4 +26,4 @@ jobs:
       - name: Run Python Script
         env:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: python "LGRS_rawdata 45days_epi.py" # <-- 사용자님의 실제 파일명과 정확히 일치해야 함
+        run: python "LGRS_rawdata_45days_epi.py" # <-- 사용자님의 실제 파일명과 정확히 일치해야 함
