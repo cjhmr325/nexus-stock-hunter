@@ -1,0 +1,29 @@
+name: Nexus_Alpha_Auto_Update
+
+on:
+  schedule:
+    # 한국 시간 기준: 매일 밤 11:30 (미국 장 시작 후 데이터 반영)
+    # UTC 기준: 14:30
+    - cron: '30 14 * * *'
+  workflow_dispatch: # 직접 'Run' 버튼 눌러서 실행하고 싶을 때 사용
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install yfinance gspread pandas numpy google-auth
+
+      - name: Run Python Script
+        env:
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+        run: python "LGRS_rawdata 45days_epi.py" # <-- 사용자님의 실제 파일명과 정확히 일치해야 함
