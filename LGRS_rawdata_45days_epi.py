@@ -9,53 +9,80 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- [1. 전용 함수: 옵션 지표 계산] ---
+import yfinance as yf
+import pandas as pd
+from datetime import datetime
+
+# --- [1. 전용 함수: 옵션 지표 계산] ---
 def calculate_option_metrics(ticker_symbol):
     tk = yf.Ticker(ticker_symbol)
-    exps = tk.options
+    try:
+        exps = tk.options
+        current_price = tk.history(period='1d')['Close'].iloc[-1]
+    except:
+        return [0] * 15 # 데이터 로드 실패 시 15개 0 반환
+
     today = datetime.now()
-    metrics = {"T": [], "D": [], "W": [], "P": []}
+    # T(중심), D(밀도), W(너비), P(자본PCR), M(Total Mass)
+    metrics = {"T": [], "D": [], "W": [], "P": [], "M": []}
 
     if not exps:
-        return [0] * 12
+        return [0] * 15
 
     for period in [3, 5, 10]:
-        all_data = []
-        for exp in exps[:8]: # 최근 8개 만기일 탐색
+        period_data = []
+        for exp in exps:
             dte = (datetime.strptime(exp, '%Y-%m-%d') - today).days + 1
             if 0 <= dte <= period:
                 try:
                     chain = tk.option_chain(exp)
                     for df, side in [(chain.calls, 'Call'), (chain.puts, 'Put')]:
-                        tmp = df.copy()
-                        # 에너지 계산 식
-                        tmp['energy'] = (tmp['strike'] + tmp['lastPrice']) * tmp['openInterest'] * tmp['volume']
+                        tmp = df[df['openInterest'] > 0].copy()
+                        
+                        # [위치 계산] Pos = Strike + Price (Call) / Strike - Price (Put)
+                        if side == 'Call':
+                            tmp['pos'] = tmp['strike'] + tmp['lastPrice']
+                        else:
+                            tmp['pos'] = tmp['strike'] - tmp['lastPrice']
+                        
+                        # [핵심 로직] 실질 자본(Locked Mass) = 가격 * OI * 100
+                        tmp['mass'] = tmp['lastPrice'] * tmp['openInterest'] * 100
                         tmp['side'] = side
-                        all_data.append(tmp[['strike', 'energy', 'side']])
+                        period_data.append(tmp[['pos', 'mass', 'side', 'strike']])
                 except: continue
 
-        if all_data:
-            df = pd.concat(all_data)
-            total_e = df['energy'].sum()
-            df_s = df.groupby('strike')['energy'].sum().reset_index().sort_values('energy', ascending=False)
-            df_s['cum_pct'] = (df_s['energy'].cumsum() / total_e) * 100
+        if period_data:
+            df = pd.concat(period_data)
+            total_m = df['mass'].sum()
             
-            # 12개 지표 계산 (B~M열)
-            t_price = (df_s.head(3)['strike'] * df_s.head(3)['energy']).sum() / df_s.head(3)['energy'].sum()
-            dens = (df_s.head(5)['energy'].sum() / total_e) * 100
-            w_zone = df_s[df_s['cum_pct'] <= 70]
-            wdth = w_zone['strike'].max() - w_zone['strike'].min() if not w_zone.empty else 0
-            c_e = df[df['side'] == 'Call']['energy'].sum()
-            p_e = df[df['side'] == 'Put']['energy'].sum()
-            pcr = p_e / c_e if c_e > 0 else 0
+            # 1. T (중심): 자본 상위 5개 지점의 가중 평균 (노이즈 제거)
+            top5 = df.nlargest(5, 'mass')
+            t_price = (top5['pos'] * top5['mass']).sum() / top5['mass'].sum()
+            
+            # 2. D (밀도): 상위 5개 지점 자본 비중 (%)
+            dens = (top5['mass'].sum() / total_m) * 100
+            
+            # 3. W (너비): 자본 70%가 분포하는 가격 범위 ($)
+            df_s = df.groupby('pos')['mass'].sum().reset_index().sort_values('pos')
+            df_s['cum_pct'] = (df_s['mass'].cumsum() / total_m) * 100
+            w_zone = df_s[(df_s['cum_pct'] >= 15) & (df_s['cum_pct'] <= 85)]
+            wdth = w_zone['pos'].max() - w_zone['pos'].min() if not w_zone.empty else 0
+            
+            # 4. P (자본PCR): Put 자본 / Call 자본
+            c_m = df[df['side'] == 'Call']['mass'].sum()
+            p_m = df[df['side'] == 'Put']['mass'].sum()
+            pcr = p_m / c_m if c_m > 0 else 0
 
             metrics["T"].append(round(t_price, 2))
             metrics["D"].append(round(dens, 1))
             metrics["W"].append(round(wdth, 1))
             metrics["P"].append(round(pcr, 2))
+            metrics["M"].append(int(total_m)) # Total Mass 추가
         else:
             for k in metrics: metrics[k].append(0)
 
-    return metrics["T"] + metrics["D"] + metrics["W"] + metrics["P"]
+    # B~M열(12개) + N~P열(Mass 3개) 총 15개 리턴
+    return metrics["T"] + metrics["D"] + metrics["W"] + metrics["P"] + metrics["M"]
 
 # --- [인증 로직 통합본] ---
 def get_gspread_client():
@@ -378,7 +405,7 @@ try:
     ws_opt = sh.worksheet("Callputoption")
     
     # 1. B열부터 M열까지만 청소 (A열의 FILTER 수식과 N열 이후의 분석 수식 보호)
-    ws_opt.batch_clear(["B2:M500"]) 
+    ws_opt.batch_clear(["B2:P500"]) 
     time.sleep(0.5)
     
     # 2. 데이터 입력 (B2 셀부터 시작하여 M열까지만 데이터가 채워짐)
