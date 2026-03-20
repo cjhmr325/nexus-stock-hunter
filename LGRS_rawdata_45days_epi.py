@@ -8,6 +8,55 @@ import time
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
+# --- [1. 전용 함수: 옵션 지표 계산] ---
+def calculate_option_metrics(ticker_symbol):
+    tk = yf.Ticker(ticker_symbol)
+    exps = tk.options
+    today = datetime.now()
+    metrics = {"T": [], "D": [], "W": [], "P": []}
+
+    if not exps:
+        return [0] * 12
+
+    for period in [3, 5, 10]:
+        all_data = []
+        for exp in exps[:8]: # 최근 8개 만기일 탐색
+            dte = (datetime.strptime(exp, '%Y-%m-%d') - today).days + 1
+            if 0 <= dte <= period:
+                try:
+                    chain = tk.option_chain(exp)
+                    for df, side in [(chain.calls, 'Call'), (chain.puts, 'Put')]:
+                        tmp = df.copy()
+                        # 에너지 계산 식
+                        tmp['energy'] = (tmp['strike'] + tmp['lastPrice']) * tmp['openInterest'] * tmp['volume']
+                        tmp['side'] = side
+                        all_data.append(tmp[['strike', 'energy', 'side']])
+                except: continue
+
+        if all_data:
+            df = pd.concat(all_data)
+            total_e = df['energy'].sum()
+            df_s = df.groupby('strike')['energy'].sum().reset_index().sort_values('energy', ascending=False)
+            df_s['cum_pct'] = (df_s['energy'].cumsum() / total_e) * 100
+            
+            # 12개 지표 계산 (B~M열)
+            t_price = (df_s.head(3)['strike'] * df_s.head(3)['energy']).sum() / df_s.head(3)['energy'].sum()
+            dens = (df_s.head(5)['energy'].sum() / total_e) * 100
+            w_zone = df_s[df_s['cum_pct'] <= 70]
+            wdth = w_zone['strike'].max() - w_zone['strike'].min() if not w_zone.empty else 0
+            c_e = df[df['side'] == 'Call']['energy'].sum()
+            p_e = df[df['side'] == 'Put']['energy'].sum()
+            pcr = p_e / c_e if c_e > 0 else 0
+
+            metrics["T"].append(round(t_price, 2))
+            metrics["D"].append(round(dens, 1))
+            metrics["W"].append(round(wdth, 1))
+            metrics["P"].append(round(pcr, 2))
+        else:
+            for k in metrics: metrics[k].append(0)
+
+    return metrics["T"] + metrics["D"] + metrics["W"] + metrics["P"]
+
 # --- [인증 로직 통합본] ---
 def get_gspread_client():
     # 1. GitHub Actions 환경 확인 (Secret 변수 존재 여부)
@@ -79,6 +128,7 @@ def sync_sheet_dates(target_sheets, date_index):
 ws_config = sh.worksheet("Config_Settings")
 tickers = [t.strip() for t in ws_config.col_values(1)[1:] if t.strip()]
 payloads = {name: [] for name in all_ws_names}
+option_final_payload = [] # 옵션 전용 바구니
 master_date_index = None
 
 for ticker in tickers:
@@ -94,20 +144,25 @@ for ticker in tickers:
 
         if master_date_index is None: master_date_index = df.index
 
+        # A. 옵션 지표 계산 (전용 함수 호출)
+        opt_row = calculate_option_metrics(ticker)
+        option_final_payload.append(opt_row)
+
         # 3. 엑셀 수식용 기초 데이터 추출
         close = df['Close']
         high, low, opens, vol = df['High'], df['Low'], df['Open'], df['Volume']
         close_yest = close.shift(1)
 
+        # 1. 옵션 데이터 초기화
         tk_obj = yf.Ticker(ticker)
         shares = tk_obj.info.get('sharesOutstanding', 0)
 
         if df.empty or len(df) < 50:
             for name in all_ws_names:
+                if name == "Callputoption": continue # 옵션 시트는 위에서 처리함
                 limit = 250 if name in index_sheets else 45
                 payloads[name].append([0] * limit)
             continue
-
 
 
         # --- [A. 4대 지표 로직 계산] ---
@@ -285,6 +340,7 @@ for ticker in tickers:
     except Exception as e:
         print(f"❌ {ticker} 오류: {e}")
         for name in all_ws_names:
+            if name == "Callputoption": continue
             limit = 250 if name in index_sheets else 45
             payloads[name].append([0] * limit)
 
@@ -295,15 +351,43 @@ if master_date_index is not None:
 # 마지막 업데이트 루프 부분 보완
 for name in all_ws_names:
     if name not in sheets: continue
+    ws = sheets[name]
     data = payloads[name]
+    ticker_count = len(tickers)
 
-    # 1. 티커 업데이트
-    sheets[name].update([[t] for t in tickers], f'A2:A{len(tickers)+1}')
+    # 1. [중요] 기존 쓰레기 데이터 청소 (A2부터 Z열 넉넉하게 500행까지)
+    # 티커가 줄어들었을 때 밑에 남는 '유령 데이터'를 싹 지웁니다.
+    ws.batch_clear(["A2:Z500"]) 
+    time.sleep(0.5)
 
-    # 2. 데이터 업데이트
-    limit = 250 if name in index_sheets else 45
-    end_col_a1 = gspread.utils.rowcol_to_a1(len(data) + 1, limit + 1)
-    sheets[name].update(data, f'B2:{end_col_a1}')
+    if ticker_count > 0:
+        # 2. 티커 리스트 업데이트 (A열)
+        ws.update([[t] for t in tickers], f'A2:A{ticker_count + 1}')
 
-    print(f"✨ {name} 데이터 수송 완료")
-    time.sleep(1)  # <--- 시트 하나 끝날 때마다 1초만 쉬어주면 안전합니다.
+        # 3. 계산된 데이터 업데이트 (B열부터)
+        limit = 250 if name in index_sheets else 45
+        # 데이터 행수와 열수를 계산해서 정확한 범위(A1 노테이션) 생성
+        end_col_a1 = gspread.utils.rowcol_to_a1(ticker_count + 1, limit + 1)
+        ws.update(data, f'B2:{end_col_a1}')
+
+    print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 및 청소 성공")
+    time.sleep(1) # API 할당량 초과 방지
+
+# [최종 업데이트부]
+try:
+    ws_opt = sh.worksheet("Callputoption")
+    
+    # 1. B열부터 M열까지만 청소 (A열의 FILTER 수식과 N열 이후의 분석 수식 보호)
+    ws_opt.batch_clear(["B2:M500"]) 
+    time.sleep(0.5)
+    
+    # 2. 데이터 입력 (B2 셀부터 시작하여 M열까지만 데이터가 채워짐)
+    if option_final_payload:
+        ws_opt.update(option_final_payload, "B2") 
+        
+    print("✨ Callputoption 시트 업데이트 완료!")
+    print("   - A열 FILTER 수식 보존 완료")
+    print("   - N열 이후 개인 분석 수식 보존 완료")
+    
+except Exception as e:
+    print(f"🚨 업데이트 중 오류 발생: {e}")
