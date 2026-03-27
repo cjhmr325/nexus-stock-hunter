@@ -4,9 +4,18 @@ import gspread
 from datetime import datetime, timedelta
 from google.oauth2.service_account import Credentials
 
-def connect_to_sheet(sheet_url, json_key_path='secret_key.json'):
-    scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    creds = Credentials.from_service_account_file(json_key_path, scopes=scopes)
+def connect_to_sheet(sheet_url):
+    # 깃허브 Secrets(금고)에 저장된 값을 읽어옵니다.
+    json_data = os.environ.get("GOOGLE_SHEETS_JSON")
+    
+    if json_data:
+        # 깃허브 서버에서 실행될 때 (금고 데이터 사용)
+        info = json.loads(json_data)
+        creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
+    else:
+        # 내 컴퓨터에서 실행될 때 (로컬 파일 사용)
+        creds = Credentials.from_service_account_file('secret_key.json', scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
+    
     gc = gspread.authorize(creds)
     return gc.open_by_url(sheet_url).worksheet("Raw_NQ")
 
