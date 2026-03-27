@@ -66,24 +66,26 @@ def get_nexus_master_raw(ticker_symbol):
     except: return [0]*10
 
 
-# [4] 메인 업데이트 로직 (H열 시작 및 AD열 종료 고정)
+# [4] 메인 업데이트 로직 (데이터 보존 로직 포함)
 def run_update(raw_sheet):
+    # 최신 가격 데이터 다운로드 (최근 5일)
     s_df = yf.download("^NDX", period="5d", interval="1d", auto_adjust=True)
     f_h_df = yf.download("NQ=F", period="5d", interval="1h", auto_adjust=True)
     vxn_df = yf.download("^VXN", period="5d", interval="1d", auto_adjust=True)
     
-    # H열(8번째 열)의 모든 데이터를 가져옴
+    # 시트의 기존 데이터를 모두 가져옴 (H열 날짜 확인 및 기존 Nexus 데이터 보존용)
     all_values = raw_sheet.get_all_values()
-    # 8번째 열(Index 7)이 Date(H열)인 것을 확인
+    # H열(Index 7)의 날짜 리스트 추출
     existing_dates = [row[7] if len(row) > 7 else "" for row in all_values] 
     
-    nexus_raw = get_nexus_master_raw("^NDX") 
+    # 오늘자 옵션 데이터 1회만 추출
+    nexus_raw_today = get_nexus_master_raw("^NDX") 
     today_str = datetime.now().strftime('%Y-%m-%d')
 
     for date, s_row in s_df.iterrows():
         curr_date = date.strftime('%Y-%m-%d')
         
-        # 데이터 정제
+        # 1. 가격 세트 준비 (H열 ~ T열용 13개 항목)
         s_o, s_h, s_l, s_c = force_float(s_row['Open']), force_float(s_row['High']), force_float(s_row['Low']), force_float(s_row['Close'])
         s_v = int(force_float(s_row['Volume']))
         vxn = force_float(vxn_df.loc[date]['Close']) if date in vxn_df.index else 0
@@ -95,26 +97,48 @@ def run_update(raw_sheet):
             f_v = int(force_float(f_match['Volume']))
         else: f_o = f_h = f_l = f_c = f_v = 0
 
-        # [H열~T열] 가격 세트 (13개) + [U열~AD열] 원천 데이터 (10개) = 총 23개
-        row_price = [curr_date, round(s_o, 2), round(s_h, 2), round(s_l, 2), round(s_c, 2), s_v, round(f_o, 2), round(f_h, 2), round(f_l, 2), round(f_c, 2), f_v, round(f_c - s_c, 2), round(vxn, 2)]
-        row_nexus = nexus_raw if (curr_date == today_str) else [0] * 10
-        final_row = row_price + row_nexus # 총 23개 항목
+        row_price = [curr_date, round(s_o, 2), round(s_h, 2), round(s_l, 2), round(s_c, 2), s_v, 
+                     round(f_o, 2), round(f_h, 2), round(f_l, 2), round(f_c, 2), f_v, 
+                     round(f_c - s_c, 2), round(vxn, 2)]
+
+        # 2. 옵션 세트 결정 (U열 ~ AD열용 10개 항목)
+        row_nexus = [0] * 10 # 기본값
+        
+        if curr_date in existing_dates:
+            idx = existing_dates.index(curr_date)
+            current_row_data = all_values[idx] if idx < len(all_values) else []
+            
+            # 오늘 날짜인 경우: 새로 추출한 데이터 사용
+            if curr_date == today_str:
+                row_nexus = nexus_raw_today
+            # 오늘이 아닌 경우: 시트에 이미 데이터가 있다면 기존 값 유지 (0 덮어쓰기 방지)
+            elif len(current_row_data) > 20:
+                # U열(index 20)부터 AD열(index 29)까지 추출
+                existing_nexus = current_row_data[20:30]
+                # 데이터가 실질적으로 존재하는지 확인 (전부 '0'이나 빈칸이 아닌 경우)
+                if any(str(val).strip() not in ["0", "0.0", ""] for val in existing_nexus):
+                    row_nexus = existing_nexus
+                else:
+                    row_nexus = [0] * 10
+        else:
+            # 신규 날짜인 경우: 오늘이면 데이터 넣고, 아니면 0
+            row_nexus = nexus_raw_today if (curr_date == today_str) else [0] * 10
+
+        # 3. 최종 결합 및 업데이트
+        final_row = row_price + row_nexus
 
         if curr_date in existing_dates:
-            # H열(8번째)부터 AD열(30번째)까지 정확히 타격
-            idx = existing_dates.index(curr_date) + 1
-            raw_sheet.update(f'H{idx}:AD{idx}', [final_row])
-            print(f"✅ {curr_date} 행 업데이트 (H{idx})")
+            row_num = existing_dates.index(curr_date) + 1
+            raw_sheet.update(f'H{row_num}:AD{row_num}', [final_row], value_input_option='USER_ENTERED')
+            print(f"✅ {curr_date} 업데이트 완료 (가격 갱신 + 기존 옵션 데이터 보존)")
         else:
-            # 날짜가 없으면 가장 아래 빈 행(최소 61행)에 삽입
-            # 이미지 f4d85c 기준 60행 다음은 61행
+            # 새 행 삽입 로직
             new_idx = len([x for x in existing_dates if x.strip()]) + 1
             if new_idx < 61: new_idx = 61
+            raw_sheet.update(f'H{new_idx}:AD{new_idx}', [final_row], value_input_option='USER_ENTERED')
+            print(f"✅ {curr_date} 신규 삽입 완료 (H{new_idx})")
             
-            # H열부터 시작하므로 앞의 A~G열(7개)은 None으로 채움
-            raw_sheet.update(f'H{new_idx}:AD{new_idx}', [final_row])
-            print(f"✅ {curr_date} 신규 삽입 (H{new_idx})")
-            # 중복 방지용 리스트 갱신
+            # 리스트 갱신 (중복 방지)
             if len(existing_dates) < new_idx:
                 existing_dates.extend([""] * (new_idx - len(existing_dates)))
             existing_dates[new_idx-1] = curr_date
@@ -124,5 +148,6 @@ if __name__ == "__main__":
     try:
         sheet = connect_to_sheet(URL)
         run_update(sheet)
-        print("✅ 밀림 현상 수정 완료 및 데이터 로드 성공")
-    except Exception as e: print(f"❌ 오류: {e}")
+        print("🚀 모든 작업이 성공적으로 완료되었습니다.")
+    except Exception as e: 
+        print(f"❌ 오류 발생: {e}")
