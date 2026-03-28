@@ -70,7 +70,7 @@ def get_nexus_master_raw(ticker_symbol):
 def run_update(raw_sheet):
     # 최신 가격 데이터 다운로드 (최근 5일)
     s_df = yf.download("^NDX", period="5d", interval="1d", auto_adjust=True)
-    f_h_df = yf.download("NQ=F", period="5d", interval="1h", auto_adjust=True)
+    f_h_df = yf.download("NQ=F", period="5d", interval="1d", auto_adjust=True)
     vxn_df = yf.download("^VXN", period="5d", interval="1d", auto_adjust=True)
     
     # 시트의 기존 데이터를 모두 가져옴 (H열 날짜 확인 및 기존 Nexus 데이터 보존용)
