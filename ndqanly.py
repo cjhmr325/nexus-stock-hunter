@@ -88,16 +88,25 @@ def run_update(raw_sheet):
     all_values = raw_sheet.get_all_values()
     existing_dates = [row[7] if len(row) > 7 else "" for row in all_values] 
     
+    now = datetime.now()
+    current_run_time = now.strftime('%m-%d %H:%M') # "03-28 13:50" (오늘 시각)
     if s_df.empty: return
     today_str = s_df.index[-1].strftime('%Y-%m-%d')
+    display_date = f"{today_str} {now.strftime('%H:%M')}"  # [기록용] 시트 H열에 실제 찍힐 값 (분 단위까지)
 
     nexus_raw_today = get_nexus_master_raw("^NDX") 
     
 
     for date, s_row in s_df.iterrows():
         curr_date = date.strftime('%Y-%m-%d')
+        if curr_date == s_df.index[-1].strftime('%Y-%m-%d'):
+        # 예: "2026-03-27 (Upd: 03-28 13:50)" 
+        # 혹은 깔끔하게 "2026-03-27 13:50" (단, 날짜는 데이터 날짜 유지)
+            record_date = f"{curr_date} [{current_run_time}]" 
+        else:
+            record_date = curr_date # 과거 데이터는 건드리지 않음
         
-        # 1. 가격 세트 (H~T)
+        # --- [순서 변경 1] 가격 데이터 생성 ---
         s_o, s_h, s_l, s_c = force_float(s_row['Open']), force_float(s_row['High']), force_float(s_row['Low']), force_float(s_row['Close'])
         s_v = int(force_float(s_row['Volume']))
         vxn = force_float(vxn_df.loc[date]['Close']) if date in vxn_df.index else 0
@@ -109,40 +118,37 @@ def run_update(raw_sheet):
             f_v = int(force_float(f_match['Volume']))
         else: f_o = f_h = f_l = f_c = f_v = 0
 
-        row_price = [curr_date, round(s_o, 2), round(s_h, 2), round(s_l, 2), round(s_c, 2), s_v, 
+        row_price = [record_date, round(s_o, 2), round(s_h, 2), round(s_l, 2), round(s_c, 2), s_v, 
                      round(f_o, 2), round(f_h, 2), round(f_l, 2), round(f_c, 2), f_v, 
                      round(f_c - s_c, 2), round(vxn, 2)]
 
-        # 2. 옵션 세트 결정 (U~AN) - 총 20개 항목
+        # --- [순서 변경 2] 옵션 데이터(U~AN) 결정 (위로 올림) ---
         row_nexus = [0] * 20 
-        
-        if curr_date in existing_dates:
-            idx = existing_dates.index(curr_date)
+        search_dates = [d[:10] for d in existing_dates] # 비교용 리스트
+
+        if curr_date in search_dates:
+            idx = search_dates.index(curr_date)
             current_row_data = all_values[idx] if idx < len(all_values) else []
             
             if curr_date == today_str:
                 row_nexus = nexus_raw_today
             elif len(current_row_data) > 20:
-                # U열(20)부터 AN열(39)까지 20개 추출
+                # 기존 데이터 보존 로직
                 existing_nexus = current_row_data[20:40]
                 if any(str(val).strip() not in ["0", "0.0", ""] for val in existing_nexus):
                     row_nexus = (existing_nexus + [0]*20)[:20]
-                else:
-                    row_nexus = [0] * 20
         else:
             row_nexus = nexus_raw_today if (curr_date == today_str) else [0] * 20
 
-        # 3. 최종 결합 및 업데이트 (H ~ AN)
+        # --- [순서 변경 3] 통합 업데이트 (단 한 번만 수행) ---
         final_row = row_price + row_nexus
 
-        if curr_date in existing_dates:
-            row_num = existing_dates.index(curr_date) + 1
-            # 범위를 AN까지 확장
+        if curr_date in search_dates:
+            row_num = search_dates.index(curr_date) + 1
             raw_sheet.update(f'H{row_num}:AN{row_num}', [final_row], value_input_option='USER_ENTERED')
-            print(f"✅ {curr_date} 업데이트 완료")
+            print(f"✅ {curr_date} (H{row_num}) 업데이트 완료")
         else:
-            new_idx = len([x for x in existing_dates if x.strip()]) + 1
-            if new_idx < 61: new_idx = 61
+            new_idx = max(len([x for x in existing_dates if x.strip()]) + 1, 61)
             raw_sheet.update(f'H{new_idx}:AN{new_idx}', [final_row], value_input_option='USER_ENTERED')
             print(f"✅ {curr_date} 신규 삽입 (H{new_idx})")
 
