@@ -120,12 +120,18 @@ def get_nexus_master_raw(ticker_symbol):
         return [0]*30
     
 
-# [4] 메인 업데이트 로직
 def run_update(raw_sheet):
+    # 1. 데이터 로드 및 야후 지랄(MultiIndex) 즉시 제거
     s_df = yf.download("^NDX", period="5d", interval="1d", auto_adjust=True)
     f_h_df = yf.download("NQ=F", period="5d", interval="1d", auto_adjust=True)
     vxn_df = yf.download("^VXN", period="5d", interval="1d", auto_adjust=True)
-    
+
+    # 멀티인덱스면 1층으로 압축 (이름표 지랄 방지)
+    if isinstance(f_h_df.columns, pd.MultiIndex):
+        f_h_df.columns = f_h_df.columns.get_level_values(0)
+    if isinstance(s_df.columns, pd.MultiIndex):
+        s_df.columns = s_df.columns.get_level_values(0)
+
     if s_df.empty: return
     
     all_values = raw_sheet.get_all_values()
@@ -141,22 +147,36 @@ def run_update(raw_sheet):
         curr_date = date.strftime('%Y-%m-%d')
         record_date = f"{curr_date} [{current_run_time}]" if curr_date == today_str else curr_date
         
-        # 가격 세트 (H~T: 13개)
+        # 현물 데이터
         s_c = force_float(s_row['Close'])
         vxn = force_float(vxn_df.loc[date]['Close']) if date in vxn_df.index else 0
-        target_ts = date.replace(hour=16, minute=0)
-        f_match = f_h_df[f_h_df.index.tz_localize(None) <= target_ts.replace(tzinfo=None)].tail(1)
-        f_c = force_float(f_match['Close']) if not f_match.empty else 0
         
-        row_price = [record_date, round(force_float(s_row['Open']), 2), round(force_float(s_row['High']), 2), 
-                     round(force_float(s_row['Low']), 2), round(s_c, 2), int(force_float(s_row['Volume'])),
-                     round(force_float(f_match['Open']), 2) if not f_match.empty else 0,
-                     round(force_float(f_match['High']), 2) if not f_match.empty else 0,
-                     round(force_float(f_match['Low']), 2) if not f_match.empty else 0,
-                     round(f_c, 2), int(force_float(f_match['Volume'])) if not f_match.empty else 0,
-                     round(f_c - s_c, 2), round(vxn, 2)]
+        # 2. [핵심] 선물 데이터(f_match) 추출 - 날짜 기반으로 안전하게
+        f_match = f_h_df[f_h_df.index.strftime('%Y-%m-%d') == curr_date]
+        
+        # 만약 날짜 매칭 실패 시 가장 최근 데이터라도 사용
+        if f_match.empty and not f_h_df.empty:
+            f_match = f_h_df.tail(1)
 
-        # 옵션 세트 (U~AX: 30개)
+        # 3. [무적] 데이터 추출 - 컬럼 이름 대신 '위치'로 가져오기 (0: Close, 1: High, 2: Low, 3: Open, 4: Volume)
+        if not f_match.empty:
+            f_c = force_float(f_match.iloc[0, 0])
+            f_h = force_float(f_match.iloc[0, 1])
+            f_l = force_float(f_match.iloc[0, 2])
+            f_o = force_float(f_match.iloc[0, 3])
+            f_v = force_float(f_match.iloc[0, 4])
+        else:
+            f_c = f_h = f_l = f_o = f_v = 0
+            print(f"⚠️ {curr_date}: NQ=F 데이터 완전 누락")
+
+        row_price = [
+            record_date, round(force_float(s_row['Open']), 2), round(force_float(s_row['High']), 2), 
+            round(force_float(s_row['Low']), 2), round(s_c, 2), int(force_float(s_row['Volume'])),
+            round(f_o, 2), round(f_h, 2), round(f_l, 2), round(f_c, 2), int(f_v),
+            round(f_c - s_c, 2), round(vxn, 2)
+        ]
+
+        # 옵션 및 시트 업데이트 로직은 기존과 동일
         row_nexus = [0] * 30
         if curr_date in search_dates:
             idx = search_dates.index(curr_date)
@@ -169,14 +189,10 @@ def run_update(raw_sheet):
 
         final_row = row_price + row_nexus
         
-        if curr_date in search_dates:
-            row_num = search_dates.index(curr_date) + 1
-            raw_sheet.update(f'H{row_num}:AX{row_num}', [final_row], value_input_option='USER_ENTERED')
-            print(f"✅ {curr_date} 업데이트")
-        else:
-            new_idx = max(len([x for x in existing_dates if x.strip()]) + 1, 61)
-            raw_sheet.update(f'H{new_idx}:AX{new_idx}', [final_row], value_input_option='USER_ENTERED')
-            print(f"✅ {curr_date} 신규 삽입")
+        # 시트 업데이트 (Deprecation 경고 해결 버전)
+        row_num = search_dates.index(curr_date) + 1 if curr_date in search_dates else max(len([x for x in existing_dates if x.strip()]) + 1, 61)
+        raw_sheet.update(range_name=f'H{row_num}:AX{row_num}', values=[final_row], value_input_option='USER_ENTERED')
+        print(f"✅ {curr_date} 처리 완료")
 
 if __name__ == "__main__":
     URL = "https://docs.google.com/spreadsheets/d/13oY7i3IWz8npmWsbqC9h9DYJPjAR2XN5XO3R8jlIurk/edit"
