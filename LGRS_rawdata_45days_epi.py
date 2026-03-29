@@ -93,8 +93,6 @@ def get_gspread_client():
         print("🌐 GitHub Actions 환경에서 인증을 시도합니다...")
         creds_dict = json.loads(json_creds)
     else:
-        # 2. 로컬 VS Code 환경 확인
-        # 파일명을 'secret_key.json'으로 통일했습니다.
         key_filename = 'secret_key.json' 
         
         # 파일이 실제로 존재하는지 체크 (경로 오류 방지)
@@ -157,6 +155,9 @@ tickers = [t.strip() for t in ws_config.col_values(1)[1:] if t.strip()]
 payloads = {name: [] for name in all_ws_names}
 option_final_payload = [] # 옵션 전용 바구니
 master_date_index = None
+target_today = datetime.now()
+global_master_dates = None
+print(f"🚀 분석 시작 시각: {target_today.strftime('%Y-%m-%d %H:%M:%S')}")
 
 for ticker in tickers:
     try:
@@ -165,9 +166,13 @@ for ticker in tickers:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. [날짜 밀림 방지] 오늘 장중 데이터면 삭제하여 어제 종가를 B열에 맞춤
-        #if not df.empty and df.index[-1].date() == datetime.now().date():
-         #   df = df.iloc[:-1]
+        # [핵심 변경] 가장 최신 날짜를 가진 종목을 기준으로 master_date_index를 계속 갱신
+        # 이렇게 하면 어떤 종목은 업데이트가 늦더라도, 업데이트가 빠른 종목을 따라 날짜가 최신화됨
+        current_ticker_dates = df.index
+        if global_master_dates is None or current_ticker_dates[-1] > global_master_dates[-1]:
+            global_master_dates = current_ticker_dates
+            print(f"📅 기준 날짜 갱신 ({ticker}): {global_master_dates[-1].strftime('%Y-%m-%d')}")
+                
 
         if master_date_index is None: master_date_index = df.index
 
