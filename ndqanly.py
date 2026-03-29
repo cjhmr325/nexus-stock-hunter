@@ -30,41 +30,77 @@ def get_nexus_master_raw(ticker_symbol):
     try:
         exps = tk.options
         if not exps: return [0]*30
-        chain = None
-        for exp in exps[:2]:
-            tmp_chain = tk.option_chain(exp)
-            if not tmp_chain.calls.empty and tmp_chain.calls['openInterest'].sum() > 0:
-                chain = tmp_chain
-                break
-        if chain is None: return [0]*30
         
-        calls, puts = chain.calls.copy(), chain.puts.copy()
+        # 1. [확장] 최대 8개의 만기일을 가져와서 하나의 데이터프레임으로 통합
+        all_calls = []
+        all_puts = []
+        
+        # 상위 8개 만기일 전수 조사 (약 2달치)
+        target_exps = exps[:8] 
+        for exp in target_exps:
+            chain = tk.option_chain(exp)
+            # 만기일 정보를 포함하여 데이터 수집
+            c = chain.calls.copy()
+            p = chain.puts.copy()
+            c['expiry'] = exp
+            p['expiry'] = exp
+            all_calls.append(c)
+            all_puts.append(p)
+            
+        if not all_calls or not all_puts: return [0]*30
+        
+        # 전체 데이터 통합
+        df_calls = pd.concat(all_calls, ignore_index=True)
+        df_puts = pd.concat(all_puts, ignore_index=True)
 
-        # [기본 통계 10개] (U~AD) - 기존과 동일
-        c_oi_m = (calls['strike'] * calls['openInterest'] * 100).sum()
-        p_oi_m = (puts['strike'] * puts['openInterest'] * 100).sum()
-        c_vol_m = (calls['strike'] * calls['volume'].fillna(0) * 100).sum()
-        p_vol_m = (puts['strike'] * puts['volume'].fillna(0) * 100).sum()
-        c_avg_s = (calls['strike'] * calls['openInterest']).sum() / calls['openInterest'].sum()
-        p_avg_s = (puts['strike'] * puts['openInterest']).sum() / puts['openInterest'].sum()
-        avg_iv = (calls['impliedVolatility'].mean() + puts['impliedVolatility'].mean()) / 2
-        top5_sum = calls.nlargest(5, 'openInterest')['openInterest'].sum() + puts.nlargest(5, 'openInterest')['openInterest'].sum()
+        # 2. [핵심] 가격대(Strike)별로 모든 만기일의 OI와 Volume을 합산 (Aggregation)
+        agg_calls = df_calls.groupby('strike').agg({
+            'openInterest': 'sum',
+            'volume': 'sum',
+            'impliedVolatility': 'mean'
+        }).reset_index()
         
-        strikes = pd.concat([calls['strike'], puts['strike']]).unique()
-        strikes = np.sort(strikes)[::5]
+        agg_puts = df_puts.groupby('strike').agg({
+            'openInterest': 'sum',
+            'volume': 'sum',
+            'impliedVolatility': 'mean'
+        }).reset_index()
+
+        # [기본 통계 10개] - 통합 데이터 기반 연산
+        c_oi_m = (agg_calls['strike'] * agg_calls['openInterest'] * 100).sum()
+        p_oi_m = (agg_puts['strike'] * agg_puts['openInterest'] * 100).sum()
+        c_vol_m = (agg_calls['strike'] * agg_calls['volume'].fillna(0) * 100).sum()
+        p_vol_m = (agg_puts['strike'] * agg_puts['volume'].fillna(0) * 100).sum()
+        
+        c_avg_s = (agg_calls['strike'] * agg_calls['openInterest']).sum() / agg_calls['openInterest'].sum()
+        p_avg_s = (agg_puts['strike'] * agg_puts['openInterest']).sum() / agg_puts['openInterest'].sum()
+        
+        avg_iv = (agg_calls['impliedVolatility'].mean() + agg_puts['impliedVolatility'].mean()) / 2
+        
+        # 통합 데이터 기준 TOP 5 OI 합계
+        top5_sum = agg_calls.nlargest(5, 'openInterest')['openInterest'].sum() + \
+                    agg_puts.nlargest(5, 'openInterest')['openInterest'].sum()
+        
+        # Max Pain 계산 (전체 통합 스트라이크 기준)
+        strikes = pd.concat([agg_calls['strike'], agg_puts['strike']]).unique()
+        strikes = np.sort(strikes)[::5] # 연산 최적화
+        
         def get_pain(s):
-            return calls[calls['strike'] < s].apply(lambda x: (s - x['strike']) * x['openInterest'], axis=1).sum() + \
-                   puts[puts['strike'] > s].apply(lambda x: (x['strike'] - s) * x['openInterest'], axis=1).sum()
+            return agg_calls[agg_calls['strike'] < s].apply(lambda x: (s - x['strike']) * x['openInterest'], axis=1).sum() + \
+                   agg_puts[agg_puts['strike'] > s].apply(lambda x: (x['strike'] - s) * x['openInterest'], axis=1).sum()
+        
         pains = [get_pain(s) for s in strikes]
         max_pain = strikes[np.argmin(pains)] if len(pains) > 0 else 0
+        
+        # DTE는 가장 가까운 만기일 기준 유지
         dte = (datetime.strptime(exps[0], '%Y-%m-%d') - datetime.now()).days
 
         basic_stats = [int(c_oi_m), int(p_oi_m), int(c_vol_m), int(p_vol_m), round(float(max_pain), 2), 
                        int(top5_sum), round(float(c_avg_s), 2), round(float(p_avg_s), 2), round(float(avg_iv), 4), int(dte)]
 
-        # --- [친절 포인트] 지뢰 짝꿍 매칭 (가격, 화력, 가격, 화력...) ---
-        c_top5 = calls.nlargest(5, 'openInterest')
-        p_top5 = puts.nlargest(5, 'openInterest')
+        # 3. [지뢰 포착] 날짜와 상관없이 "통합 화력"이 가장 강력한 TOP 5 지점 추출
+        c_top5 = agg_calls.nlargest(5, 'openInterest')
+        p_top5 = agg_puts.nlargest(5, 'openInterest')
         
         c_pair = []
         for _, row in c_top5.iterrows():
@@ -74,12 +110,14 @@ def get_nexus_master_raw(ticker_symbol):
         for _, row in p_top5.iterrows():
             p_pair.extend([round(float(row['strike']), 2), int(row['openInterest'])])
         
-        # 데이터가 5개 미만일 경우를 대비한 0 채우기 (한 쌍씩 10개씩)
+        # 0 채우기 (데이터 부족 대비)
         while len(c_pair) < 10: c_pair.extend([0, 0])
         while len(p_pair) < 10: p_pair.extend([0, 0])
 
         return basic_stats + c_pair + p_pair # 총 30개 리턴
-    except: return [0]*30
+    except Exception as e:
+        # print(f"Error on {ticker_symbol}: {e}") # 디버깅 필요시 해제
+        return [0]*30
     
 
 # [4] 메인 업데이트 로직
