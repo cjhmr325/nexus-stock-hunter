@@ -125,7 +125,7 @@ except Exception as e:
     raise
 
 # 1. 대상 시트 그룹 설정
-index_sheets = ["Liquidity", "Gravity", "Resistance", "Stress"]
+index_sheets = ["Liquidity", "Gravity", "Resistance", "Stress", "IEnergy"]
 raw_sheets = ["DB_Raw_Price", "DB_Raw_MarketCap", "DB_Raw_Vol", "DB_Raw_High", "DB_Raw_Low", "DB_Raw_PriceOpen", "DB_Raw_Closeyest"]
 calc_sheets = ["EPI_History", "Resist_History", "Vector_History","Pressure_History"]
 all_ws_names = index_sheets + raw_sheets + calc_sheets
@@ -225,12 +225,28 @@ for ticker in tickers:
         raw_stress = (ret_abs / val) * (10**15)
         strss_list = np.log10(raw_stress.replace(0, np.nan)).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
 
+        # --- [IEnergy 수식 기반 계산] ---
+        # 엑셀 수식: (Price * Vol) * (1 - ABS(변동률)) * SIGN(변동)
+        
+        # 1. 변동률 및 방향성 계산
+        price_diff = close.diff() # 현재가 - 전일가
+        ret_pct = price_diff / close.shift(1) # (B2-C2)/C2
+        direction = np.sign(price_diff) # SIGN(B2-C2)
+        
+        # 2. 메인 에너지 계산
+        # (Price * Vol) -> 거래대금
+        raw_energy = (close * vol) * (1 - ret_pct.abs()) * direction
+        
+        # 3. 데이터 정제 및 역순 리스트화 (250일 기준)
+        ie_list = raw_energy.replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
         # 지표 데이터 할당 (250일 기준)
         index_data = {
             "Liquidity": liq_list,
             "Gravity": grav_list,
             "Resistance": res_list,
-            "Stress": strss_list
+            "Stress": strss_list,
+            "IEnergy": ie_list
         }
         for name in index_sheets:
             d = index_data[name][:250]
@@ -389,7 +405,9 @@ for name in all_ws_names:
 
     # 1. [중요] 기존 쓰레기 데이터 청소 (A2부터 Z열 넉넉하게 500행까지)
     # 티커가 줄어들었을 때 밑에 남는 '유령 데이터'를 싹 지웁니다.
-    ws.batch_clear(["A2:Z500"]) 
+    limit = 250 if name in index_sheets else 45
+    end_letter = "IP" if limit == 250 else "AZ" # 250열은 대략 IP열까지입니다.
+    ws.batch_clear([f"A2:{end_letter}1000"])
     time.sleep(0.5)
 
     if ticker_count > 0:
