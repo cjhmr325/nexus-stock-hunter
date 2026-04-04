@@ -9,9 +9,9 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- [1. 전용 함수: 옵션 지표 계산] ---
-import yfinance as yf
-import pandas as pd
-from datetime import datetime
+# def calculate_option_metrics(ticker_symbol):
+#    ... (내용 생략) ...
+#    return metrics["T"] + ... + metrics["M"]
 
 # --- [1. 전용 함수: 옵션 지표 계산] ---
 def calculate_option_metrics(ticker_symbol):
@@ -176,9 +176,9 @@ for ticker in tickers:
 
         if master_date_index is None: master_date_index = df.index
 
-        # A. 옵션 지표 계산 (전용 함수 호출)
-        opt_row = calculate_option_metrics(ticker)
-        option_final_payload.append(opt_row)
+        # [메인 루프 내부 - 180라인 근처]
+        # opt_row = calculate_option_metrics(ticker)  # <--- 주석 처리
+        # option_final_payload.append(opt_row)        # <--- 주석 처리
 
         # 3. 엑셀 수식용 기초 데이터 추출
         close = df['Close']
@@ -423,21 +423,12 @@ for name in all_ws_names:
     print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 및 청소 성공")
     time.sleep(1) # API 할당량 초과 방지
 
-# [최종 업데이트부]
-try:
-    ws_opt = sh.worksheet("Callputoption")
-    
-    # 1. B열부터 M열까지만 청소 (A열의 FILTER 수식과 N열 이후의 분석 수식 보호)
-    ws_opt.batch_clear(["B2:P500"]) 
-    time.sleep(0.5)
-    
-    # 2. 데이터 입력 (B2 셀부터 시작하여 M열까지만 데이터가 채워짐)
-    if option_final_payload:
-        ws_opt.update(option_final_payload, "B2") 
-        
-    print("✨ Callputoption 시트 업데이트 완료!")
-    print("   - A열 FILTER 수식 보존 완료")
-    print("   - N열 이후 개인 분석 수식 보존 완료")
-    
-except Exception as e:
-    print(f"🚨 업데이트 중 오류 발생: {e}")
+# [최종 업데이트부 - 365라인 근처]
+# try:
+#     ws_opt = sh.worksheet("Callputoption")
+#     ws_opt.batch_clear(["B2:P500"])  # <--- 주석 처리
+#     time.sleep(0.5)
+#     if option_final_payload:
+#         ws_opt.update(option_final_payload, "B2")  # <--- 주석 처리
+# except Exception as e:
+#     print(f"🚨 업데이트 중 오류 발생: {e}")
