@@ -197,6 +197,24 @@ for ticker in tickers:
             continue
 
 
+        # [B열~G열] 테스트 코드에서 검증된 역순 head(45) 방식
+        rev_close = close.iloc[::-1]
+        rev_close_yest = close.shift(1).iloc[::-1]
+
+        payloads["DB_Raw_Price"].append(rev_close.head(45).tolist())
+        payloads["DB_Raw_Closeyest"].append(rev_close_yest.head(45).fillna(0).tolist())
+        payloads["DB_Raw_PriceOpen"].append(opens.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_High"].append(high.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_Low"].append(low.iloc[::-1].head(45).tolist())
+        payloads["DB_Raw_Vol"].append(vol.iloc[::-1].head(45).tolist())
+
+        # [마켓캡] - 지표 계산을 위해 원본 Series를 변수로 먼저 잡습니다.
+        mcap_series = (close * (shares if shares > 0 else 0))
+        # [마켓캡] 예외처리 포함
+        mcap_vals = (close * (shares if shares > 0 else 0)).iloc[::-1].head(45).fillna(0).tolist()
+        payloads["DB_Raw_MarketCap"].append(mcap_vals)
+
+
         # --- [A. 4대 지표 로직 계산] ---
         val = close * vol
         diff = close.diff().fillna(0)
@@ -219,11 +237,13 @@ for ticker in tickers:
         res_range = (r_max - r_min).replace(0, np.nan)
         res_list = ((close - r_min) / res_range).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
 
-        # 4) Stress (시스템 민감도): LOG10(((변동률) / (대금)) * 10^15)
-        # 엑셀: LOG10(((ABS(B2-C2)/C2) / (Vol*Price)) * 10^15)
+        # 4) Stress (시스템 민감도) - [수정 지점]
         ret_abs = (diff.abs() / close.shift(1))
-        raw_stress = (ret_abs / val) * (10**15)
-        strss_list = np.log10(raw_stress.replace(0, np.nan)).replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+        # mkt_cap 대신 위에서 만든 mcap_series를 사용 (전체 기간 매칭)
+        turnover_ratio = val / mcap_series.replace(0, np.nan) 
+        raw_stress = ret_abs / turnover_ratio
+        strss_list = raw_stress.replace([np.inf, -np.inf], 0).fillna(0).iloc[::-1].tolist()
+
 
         # --- [IEnergy 수식 기반 계산] ---
         # 엑셀 수식: (Price * Vol) * (1 - ABS(변동률)) * SIGN(변동)
@@ -251,24 +271,6 @@ for ticker in tickers:
         for name in index_sheets:
             d = index_data[name][:250]
             payloads[name].append(d + [0]*(250-len(d)))
-
-
-
-        # [B열~G열] 테스트 코드에서 검증된 역순 head(45) 방식
-        rev_close = close.iloc[::-1]
-        rev_close_yest = close.shift(1).iloc[::-1]
-
-        payloads["DB_Raw_Price"].append(rev_close.head(45).tolist())
-        payloads["DB_Raw_Closeyest"].append(rev_close_yest.head(45).fillna(0).tolist())
-        payloads["DB_Raw_PriceOpen"].append(opens.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_High"].append(high.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_Low"].append(low.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_Vol"].append(vol.iloc[::-1].head(45).tolist())
-
-        # [마켓캡] 예외처리 포함
-        mcap_vals = (close * (shares if shares > 0 else 0)).iloc[::-1].head(45).fillna(0).tolist()
-        payloads["DB_Raw_MarketCap"].append(mcap_vals)
-
 
         # --- [EPI & 히스토리 45일 전체 계산 루프] ---
         # 상장주식수 안전 장치
