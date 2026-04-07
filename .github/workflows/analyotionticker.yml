@@ -3,14 +3,10 @@ name: Stock Analysis Engine - Option Ticker Update
 on:
   schedule:
     # 1. 장 시작 전 최종 데이터 확정 (현재 동부 09:00 AM / UTC 13:00)
-    # 어제 마감된 옵션 미결제약정(OI) 및 정산 데이터가 가장 정확하게 반영된 시점입니다.
     - cron: '0 13 * * *'
-
     # 2. 장중 중간 점검 및 오후장 방향성 확인 (현재 동부 01:30 PM / UTC 17:30)
-    # 오전장의 노이즈가 제거되고, 기관들의 오후장 포지션 유지가 확인되는 전략적 시점입니다.
     - cron: '30 17 * * *'
-
-  workflow_dispatch: # 필요시 'Run workflow' 버튼으로 즉시 실행 가능
+  workflow_dispatch: 
 
 jobs:
   update-ticker-data:
@@ -27,11 +23,13 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # 필요한 라이브러리를 직접 설치하도록 설정
+          pip install yfinance pandas numpy gspread google-auth
 
       - name: Run Option Ticker Analysis
         env:
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          # 파이썬 코드의 os.environ.get('GOOGLE_SHEETS_JSON')과 일치시킴
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: |
-          # 분석 엔진 실행 및 구글 시트 업데이트 로직
-          python run_analysis.py --mode update --ticker VRRM
+          # 실제 파일명인 analyotionticker.py를 실행
+          python analyotionticker.py
