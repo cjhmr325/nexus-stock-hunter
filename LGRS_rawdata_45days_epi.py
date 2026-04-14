@@ -125,7 +125,7 @@ except Exception as e:
     raise
 
 # 1. 대상 시트 그룹 설정
-index_sheets = ["Liquidity", "Gravity", "Resistance", "Stress", "IEnergy"]
+index_sheets = ["Liquidity", "Gravity", "Resistance", "Stress", "IEnergy", "M_NESM"]
 raw_sheets = ["DB_Raw_Price", "DB_Raw_MarketCap", "DB_Raw_Vol", "DB_Raw_High", "DB_Raw_Low", "DB_Raw_PriceOpen", "DB_Raw_Closeyest"]
 calc_sheets = ["EPI_History", "Resist_History", "Vector_History","Pressure_History"]
 all_ws_names = index_sheets + raw_sheets + calc_sheets
@@ -142,6 +142,9 @@ for name in all_ws_names:
 def sync_sheet_dates(target_sheets, date_index):
     formatted_dates = [d.strftime('%Y-%m-%d') for d in reversed(date_index)]
     for name, ws in target_sheets.items():
+        # [수정] M_NESM 시트는 헤더를 건드리지 않도록 제외
+        if name == "M_NESM":
+            continue
         # [교정] raw_sheets 리스트에 있는 시트명인 경우 65일치 날짜를 뿌림
         if name in ["DB_Raw_Price", "DB_Raw_MarketCap", "DB_Raw_Vol", "DB_Raw_High", "DB_Raw_Low", "DB_Raw_PriceOpen", "DB_Raw_Closeyest"]:
             limit = 65
@@ -197,9 +200,12 @@ for ticker in tickers:
 
         if df.empty or len(df) < 50:
             for name in all_ws_names:
-                if name == "Callputoption": continue # 옵션 시트는 위에서 처리함
-                limit = 250 if name in index_sheets else 45
-                payloads[name].append([0] * limit)
+                if name == "Callputoption": continue
+                if name == "M_NESM":
+                    payloads[name].append([0] * 6) # 6개 추가
+                else:
+                    limit = 250 if name in index_sheets else 45
+                    payloads[name].append([0] * limit)
             continue
 
 
@@ -275,6 +281,8 @@ for ticker in tickers:
             "IEnergy": ie_list
         }
         for name in index_sheets:
+            if name == "M_NESM": 
+                continue
             # 시트 설정에 맞는 limit 가져오기 (Liquidity 등은 250일)
             d_limit = 250 
             d = index_data[name][:d_limit]
@@ -389,6 +397,35 @@ for ticker in tickers:
         payloads["Pressure_History"].append(pressure_history_45)
 
 
+        # --- [M_NESM: 누적 거래량 가중 방향성 에너지] ---
+        denom_shares = shares if shares > 0 else 1 
+
+        # 1. 일별 방향성 * (거래량 / 총주식수) 계산
+        # 데이터가 과거->오늘 순이므로 diff()는 (오늘-어제) 방향이 됨
+        price_direction = np.sign(close.diff().fillna(0))
+        vol_weight = vol / denom_shares
+        daily_energy = price_direction * vol_weight
+
+        # 2. 기간별 MAX SCAN 값 산출
+        nesm_row = []
+        nesm_periods = [60, 80, 100, 120, 140, 160]
+
+        for p in nesm_periods:
+            if len(daily_energy) >= p:
+                # [CRITICAL MERGE POINT]
+                # 1. tail(p): 최근 p일치를 가져온다.
+                # 2. iloc[::-1]: 오늘이 맨 위로 오게 뒤집는다. (엑셀 B2가 시작점이 되도록)
+                # 3. cumsum(): 오늘부터 과거로 가며 누적합을 구한다.
+                # 4. max(): 그중 가장 컸던 고점(Peak)을 찾는다.
+                scan_values = daily_energy.tail(p).iloc[::-1].cumsum()
+                nesm_val = scan_values.max()
+            else:
+                nesm_val = 0
+            nesm_row.append(round(nesm_val, 8))
+
+        # M_NESM 전용 페이로드에 저장
+        payloads["M_NESM"].append(nesm_row)
+
 
         print(f"✅ {ticker} 분석 완료")
         time.sleep(0.05)
@@ -396,11 +433,16 @@ for ticker in tickers:
 
 
     except Exception as e:
-        print(f"❌ {ticker} 오류: {e}")
+        print(f"❌ {ticker} 상세 오류: {type(e).__name__} - {e}")
         for name in all_ws_names:
             if name == "Callputoption": continue
-            limit = 250 if name in index_sheets else 45
-            payloads[name].append([0] * limit)
+            
+            # [수정] M_NESM인 경우 6개, 나머지는 기존대로 처리
+            if name == "M_NESM":
+                payloads[name].append([0] * 6)
+            else:
+                limit = 250 if name in index_sheets else 45
+                payloads[name].append([0] * limit)
 
 # 3. 날짜 및 데이터 일괄 업데이트
 if master_date_index is not None:
@@ -412,31 +454,38 @@ for name in all_ws_names:
     if name not in sheets: continue
     ws = sheets[name]
     data = payloads[name]
-    ticker_count = len(tickers)
-
-    # 1. 시트 유형별 동적 한계치(limit) 설정
-    if name in raw_sheets:
-        current_limit = 65
-        end_letter = "BZ"  # 65열(BN)보다 넉넉하게 BZ까지 청소
-    elif name in index_sheets:
-        current_limit = 250
-        end_letter = "IP"  # 250열(IP)까지 청소
+    if name == "M_NESM":
+        # M_NESM은 BA열(53번째 열)부터가 아니라, 보통 A열 티커 뒤인 B열부터 6개를 넣는 것이 관리상 편합니다.
+        # 질문하신 "BA부터"를 적용하려면 아래와 같이 범위를 지정합니다.
+        ws.batch_clear(["A2:A1000", "BA2:BF1000"]) 
+        ws.update([[t] for t in tickers], f'A2:A{len(tickers)+1}')
+        ws.update(data, f'BA2:BF{len(tickers)+1}')
     else:
-        current_limit = 45  # 히스토리/계산 시트용
-        end_letter = "AZ"
+        ticker_count = len(tickers)
 
-    # 2. 기존 데이터 및 유령 데이터 청소
-    ws.batch_clear([f"A2:{end_letter}1000"])
-    time.sleep(0.5)
+        # 1. 시트 유형별 동적 한계치(limit) 설정
+        if name in raw_sheets:
+            current_limit = 65
+            end_letter = "BZ"  # 65열(BN)보다 넉넉하게 BZ까지 청소
+        elif name in index_sheets:
+            current_limit = 250
+            end_letter = "IP"  # 250열(IP)까지 청소
+        else:
+            current_limit = 45  # 히스토리/계산 시트용
+            end_letter = "AZ"
 
-    if ticker_count > 0:
-        # 3. 티커 리스트 업데이트 (A열)
-        ws.update([[t] for t in tickers], f'A2:A{ticker_count + 1}')
+        # 2. 기존 데이터 및 유령 데이터 청소
+        ws.batch_clear([f"A2:{end_letter}1000"])
+        time.sleep(0.5)
 
-        # 4. 계산된 데이터 업데이트 (B열부터 설정된 current_limit까지)
-        # [교정]: 위에서 정한 current_limit을 그대로 사용해야 65일치가 들어갑니다.
-        end_col_a1 = gspread.utils.rowcol_to_a1(ticker_count + 1, current_limit + 1)
-        ws.update(data, f'B2:{end_col_a1}')
+        if ticker_count > 0:
+            # 3. 티커 리스트 업데이트 (A열)
+            ws.update([[t] for t in tickers], f'A2:A{ticker_count + 1}')
+
+            # 4. 계산된 데이터 업데이트 (B열부터 설정된 current_limit까지)
+            # [교정]: 위에서 정한 current_limit을 그대로 사용해야 65일치가 들어갑니다.
+            end_col_a1 = gspread.utils.rowcol_to_a1(ticker_count + 1, current_limit + 1)
+            ws.update(data, f'B2:{end_col_a1}')
 
     print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 (범위: {current_limit}일)")
     time.sleep(1) # API Quota 방어
