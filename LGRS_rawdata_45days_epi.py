@@ -142,11 +142,17 @@ for name in all_ws_names:
 def sync_sheet_dates(target_sheets, date_index):
     formatted_dates = [d.strftime('%Y-%m-%d') for d in reversed(date_index)]
     for name, ws in target_sheets.items():
-        limit = 250 if name in index_sheets else 45
+        # [교정] raw_sheets 리스트에 있는 시트명인 경우 65일치 날짜를 뿌림
+        if name in ["DB_Raw_Price", "DB_Raw_MarketCap", "DB_Raw_Vol", "DB_Raw_High", "DB_Raw_Low", "DB_Raw_PriceOpen", "DB_Raw_Closeyest"]:
+            limit = 65
+        elif name in index_sheets:
+            limit = 250
+        else:
+            limit = 45 # History 시트들
         date_payload = formatted_dates[:limit]
         end_col_a1 = gspread.utils.rowcol_to_a1(1, limit + 1)
         ws.update([date_payload], f'B1:{end_col_a1}')
-        time.sleep(1.5)
+        time.sleep(1.2)
     print(f"📅 총 {len(target_sheets)}개 시트 날짜 동기화 완료")
 
 # --- [데이터 수집 및 계산 시작] ---
@@ -201,17 +207,17 @@ for ticker in tickers:
         rev_close = close.iloc[::-1]
         rev_close_yest = close.shift(1).iloc[::-1]
 
-        payloads["DB_Raw_Price"].append(rev_close.head(45).tolist())
-        payloads["DB_Raw_Closeyest"].append(rev_close_yest.head(45).fillna(0).tolist())
-        payloads["DB_Raw_PriceOpen"].append(opens.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_High"].append(high.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_Low"].append(low.iloc[::-1].head(45).tolist())
-        payloads["DB_Raw_Vol"].append(vol.iloc[::-1].head(45).tolist())
-
+        limit_days = 65 # 변수로 관리하는 것이 좋습니다.
+        payloads["DB_Raw_Price"].append(rev_close.head(limit_days).tolist())
+        payloads["DB_Raw_Closeyest"].append(rev_close_yest.head(limit_days).fillna(0).tolist())
+        payloads["DB_Raw_PriceOpen"].append(opens.iloc[::-1].head(limit_days).tolist())
+        payloads["DB_Raw_High"].append(high.iloc[::-1].head(limit_days).tolist())
+        payloads["DB_Raw_Low"].append(low.iloc[::-1].head(limit_days).tolist())
+        payloads["DB_Raw_Vol"].append(vol.iloc[::-1].head(limit_days).tolist())
         # [마켓캡] - 지표 계산을 위해 원본 Series를 변수로 먼저 잡습니다.
         mcap_series = (close * (shares if shares > 0 else 0))
         # [마켓캡] 예외처리 포함
-        mcap_vals = (close * (shares if shares > 0 else 0)).iloc[::-1].head(45).fillna(0).tolist()
+        mcap_vals = (close * (shares if shares > 0 else 0)).iloc[::-1].head(limit_days).fillna(0).tolist()
         payloads["DB_Raw_MarketCap"].append(mcap_vals)
 
 
@@ -269,9 +275,11 @@ for ticker in tickers:
             "IEnergy": ie_list
         }
         for name in index_sheets:
-            d = index_data[name][:250]
-            payloads[name].append(d + [0]*(250-len(d)))
-
+            # 시트 설정에 맞는 limit 가져오기 (Liquidity 등은 250일)
+            d_limit = 250 
+            d = index_data[name][:d_limit]
+            # [검증] 부족한 데이터는 0으로 채워 정확히 250개를 맞춤
+            payloads[name].append(d + [0]*(d_limit - len(d)))
         # --- [EPI & 히스토리 45일 전체 계산 루프] ---
         # 상장주식수 안전 장치
         e2_shares = shares if shares > 0 else 1
@@ -399,31 +407,39 @@ if master_date_index is not None:
     sync_sheet_dates(sheets, master_date_index)
 
 # 마지막 업데이트 루프 부분 보완
+# [최종 보완된 업데이트 루프]
 for name in all_ws_names:
     if name not in sheets: continue
     ws = sheets[name]
     data = payloads[name]
     ticker_count = len(tickers)
 
-    # 1. [중요] 기존 쓰레기 데이터 청소 (A2부터 Z열 넉넉하게 500행까지)
-    # 티커가 줄어들었을 때 밑에 남는 '유령 데이터'를 싹 지웁니다.
-    limit = 250 if name in index_sheets else 45
-    end_letter = "IP" if limit == 250 else "AZ" # 250열은 대략 IP열까지입니다.
+    # 1. 시트 유형별 동적 한계치(limit) 설정
+    if name in raw_sheets:
+        current_limit = 65
+        end_letter = "BZ"  # 65열(BN)보다 넉넉하게 BZ까지 청소
+    elif name in index_sheets:
+        current_limit = 250
+        end_letter = "IP"  # 250열(IP)까지 청소
+    else:
+        current_limit = 45  # 히스토리/계산 시트용
+        end_letter = "AZ"
+
+    # 2. 기존 데이터 및 유령 데이터 청소
     ws.batch_clear([f"A2:{end_letter}1000"])
     time.sleep(0.5)
 
     if ticker_count > 0:
-        # 2. 티커 리스트 업데이트 (A열)
+        # 3. 티커 리스트 업데이트 (A열)
         ws.update([[t] for t in tickers], f'A2:A{ticker_count + 1}')
 
-        # 3. 계산된 데이터 업데이트 (B열부터)
-        limit = 250 if name in index_sheets else 45
-        # 데이터 행수와 열수를 계산해서 정확한 범위(A1 노테이션) 생성
-        end_col_a1 = gspread.utils.rowcol_to_a1(ticker_count + 1, limit + 1)
+        # 4. 계산된 데이터 업데이트 (B열부터 설정된 current_limit까지)
+        # [교정]: 위에서 정한 current_limit을 그대로 사용해야 65일치가 들어갑니다.
+        end_col_a1 = gspread.utils.rowcol_to_a1(ticker_count + 1, current_limit + 1)
         ws.update(data, f'B2:{end_col_a1}')
 
-    print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 및 청소 성공")
-    time.sleep(1) # API 할당량 초과 방지
+    print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 (범위: {current_limit}일)")
+    time.sleep(1) # API Quota 방어
 
 # [최종 업데이트부 - 365라인 근처]
 # try:
