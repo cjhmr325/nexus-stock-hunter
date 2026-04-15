@@ -409,6 +409,8 @@ for ticker in tickers:
         # 2. 기간별 MAX SCAN 값 산출
         nesm_row = []
         nesm_periods = [60, 80, 100, 120, 140, 160]
+        max_list = [] # Max 값들을 담을 바구니
+        min_list = [] # Min 값들을 담을 바구니
 
         for p in nesm_periods:
             if len(daily_energy) >= p:
@@ -418,12 +420,17 @@ for ticker in tickers:
                 # 3. cumsum(): 오늘부터 과거로 가며 누적합을 구한다.
                 # 4. max(): 그중 가장 컸던 고점(Peak)을 찾는다.
                 scan_values = daily_energy.tail(p).iloc[::-1].cumsum()
-                nesm_val = scan_values.max()
+                nesm_max = scan_values.max()
+                nesm_min = scan_values.min() # 최솟값 추가
             else:
-                nesm_val = 0
-            nesm_row.append(round(nesm_val, 8))
-
-        # M_NESM 전용 페이로드에 저장
+                nesm_max = 0
+                nesm_min = 0
+            # 리스트에 Max와 Min을 순서대로 추가
+            max_list.append(round(nesm_max, 8))
+            min_list.append(round(nesm_min, 8))
+            # M_NESM 전용 페이로드에 저장
+            # [Max 60, 80, 100, 120, 140, 160, Min 60, 80, 100, 120, 140, 160] 순서로 합체
+        nesm_row = max_list + min_list
         payloads["M_NESM"].append(nesm_row)
 
 
