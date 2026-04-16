@@ -162,6 +162,7 @@ def sync_sheet_dates(target_sheets, date_index):
 ws_config = sh.worksheet("Config_Settings")
 tickers = [t.strip() for t in ws_config.col_values(1)[1:] if t.strip()]
 payloads = {name: [] for name in all_ws_names}
+shares_payload = []  # H열에 들어갈 주식수 전용 바구니 추가
 option_final_payload = [] # 옵션 전용 바구니
 master_date_index = None
 target_today = datetime.now()
@@ -195,8 +196,16 @@ for ticker in tickers:
         close_yest = close.shift(1)
 
         # 1. 옵션 데이터 초기화
-        tk_obj = yf.Ticker(ticker)
-        shares = tk_obj.info.get('sharesOutstanding', 0)
+        # [현재 코드 197라인 부근 수정 권장]
+        try:
+            tk_obj = yf.Ticker(ticker)
+            # info 가져오기 실패 시를 대비해 기본값 0 설정
+            shares = tk_obj.info.get('sharesOutstanding', 0) if tk_obj.info else 0
+        except Exception:
+            shares = 0 # 에러 발생 시 0으로 채워야 행 번호가 밀리지 않음
+
+        # shares_payload에 [값] 형태로 추가 (update를 위해 2차원 리스트 구조)
+        shares_payload.append([shares])
 
         if df.empty or len(df) < 50:
             for name in all_ws_names:
@@ -497,6 +506,20 @@ for name in all_ws_names:
 
     print(f"✨ {name} 시트: {ticker_count}개 종목 업데이트 완료 (범위: {current_limit}일)")
     time.sleep(1) # API Quota 방어
+
+
+# [최종 업데이트부] - 코드 가장 마지막 부분에 추가
+try:
+    ws_dw = sh.worksheet("Data_Warehouse")
+    
+    if shares_payload:
+        # H2부터 데이터 개수만큼 범위 지정 (예: H2:H37)
+        target_range = f"H2:H{len(shares_payload) + 1}"
+        ws_dw.update(shares_payload, target_range)
+        print(f"📊 Data_Warehouse 시트 H열 주식수 업데이트 완료 ({len(shares_payload)} 종목)")
+
+except Exception as e:
+    print(f"🚨 Data_Warehouse 업데이트 중 오류 발생: {e}")    
 
 # [최종 업데이트부 - 365라인 근처]
 # try:
