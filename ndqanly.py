@@ -121,12 +121,11 @@ def get_nexus_master_raw(ticker_symbol):
     
 
 def run_update(raw_sheet):
-    # 1. 데이터 로드 및 야후 지랄(MultiIndex) 즉시 제거
+    # 1. 데이터 로드 및 전처리 (멀티인덱스 방어)
     s_df = yf.download("^NDX", period="5d", interval="1d", auto_adjust=True)
     f_h_df = yf.download("NQ=F", period="5d", interval="1d", auto_adjust=True)
     vxn_df = yf.download("^VXN", period="5d", interval="1d", auto_adjust=True)
 
-    # 멀티인덱스면 1층으로 압축 (이름표 지랄 방지)
     if isinstance(f_h_df.columns, pd.MultiIndex):
         f_h_df.columns = f_h_df.columns.get_level_values(0)
     if isinstance(s_df.columns, pd.MultiIndex):
@@ -134,41 +133,34 @@ def run_update(raw_sheet):
 
     if s_df.empty: return
     
+    # 현재 시트의 데이터 로드 및 날짜 인덱싱 (H열 기준)
     all_values = raw_sheet.get_all_values()
-    existing_dates = [row[7] if len(row) > 7 else "" for row in all_values]
-    search_dates = [d[:10] for d in existing_dates]
+    # H열(8번째 열, 인덱스 7)이 날짜 기준점
+    existing_dates = [row[7][:10] if len(row) > 7 and row[7] else "" for row in all_values]
 
     now = datetime.now()
     current_run_time = now.strftime('%m-%d %H:%M')
     today_str = s_df.index[-1].strftime('%Y-%m-%d')
+    
+    # 옵션 데이터는 실행 시 한 번만 호출하여 재사용
     nexus_raw_today = get_nexus_master_raw("^NDX")
 
     for date, s_row in s_df.iterrows():
         curr_date = date.strftime('%Y-%m-%d')
         record_date = f"{curr_date} [{current_run_time}]" if curr_date == today_str else curr_date
         
-        # 현물 데이터
+        # [데이터 추출 로직 생략 - 기존과 동일]
         s_c = force_float(s_row['Close'])
         vxn = force_float(vxn_df.loc[date]['Close']) if date in vxn_df.index else 0
-        
-        # 2. [핵심] 선물 데이터(f_match) 추출 - 날짜 기반으로 안전하게
         f_match = f_h_df[f_h_df.index.strftime('%Y-%m-%d') == curr_date]
-        
-        # 만약 날짜 매칭 실패 시 가장 최근 데이터라도 사용
-        if f_match.empty and not f_h_df.empty:
-            f_match = f_h_df.tail(1)
+        if f_match.empty and not f_h_df.empty: f_match = f_h_df.tail(1)
 
-        # 3. [무적] 데이터 추출 - 컬럼 이름 대신 '위치'로 가져오기 (0: Close, 1: High, 2: Low, 3: Open, 4: Volume)
         if not f_match.empty:
-            f_c = force_float(f_match.iloc[0, 0])
-            f_h = force_float(f_match.iloc[0, 1])
-            f_l = force_float(f_match.iloc[0, 2])
-            f_o = force_float(f_match.iloc[0, 3])
-            f_v = force_float(f_match.iloc[0, 4])
+            f_c, f_h, f_l, f_o, f_v = [force_float(f_match.iloc[0, i]) for i in range(5)]
         else:
             f_c = f_h = f_l = f_o = f_v = 0
-            print(f"⚠️ {curr_date}: NQ=F 데이터 완전 누락")
 
+        # 업로드용 행 생성
         row_price = [
             record_date, round(force_float(s_row['Open']), 2), round(force_float(s_row['High']), 2), 
             round(force_float(s_row['Low']), 2), round(s_c, 2), int(force_float(s_row['Volume'])),
@@ -176,23 +168,42 @@ def run_update(raw_sheet):
             round(f_c - s_c, 2), round(vxn, 2)
         ]
 
-        # 옵션 및 시트 업데이트 로직은 기존과 동일
+        # Nexus(옵션) 데이터 매칭
         row_nexus = [0] * 30
-        if curr_date in search_dates:
-            idx = search_dates.index(curr_date)
-            if curr_date == today_str: row_nexus = nexus_raw_today
+        if curr_date in existing_dates:
+            if curr_date == today_str:
+                row_nexus = nexus_raw_today
             else:
-                row_data = all_values[idx] if idx < len(all_values) else []
-                if len(row_data) > 20: row_nexus = (row_data[20:50] + [0]*30)[:30]
+                idx = existing_dates.index(curr_date)
+                row_data = all_values[idx]
+                # 기존 데이터 보존 (H~T열이 가격데이터이므로 그 이후의 옵션 데이터를 가져옴)
+                if len(row_data) > 20: 
+                    row_nexus = (row_data[20:50] + [0]*30)[:30]
         else:
             row_nexus = nexus_raw_today if curr_date == today_str else [0]*30
 
         final_row = row_price + row_nexus
         
-        # 시트 업데이트 (Deprecation 경고 해결 버전)
-        row_num = search_dates.index(curr_date) + 1 if curr_date in search_dates else max(len([x for x in existing_dates if x.strip()]) + 1, 61)
-        raw_sheet.update(range_name=f'H{row_num}:AX{row_num}', values=[final_row], value_input_option='USER_ENTERED')
-        print(f"✅ {curr_date} 처리 완료")
+        # --- 핵심 수정 부분: 행 번호 결정 및 초기화 ---
+        if curr_date in existing_dates:
+            row_num = existing_dates.index(curr_date) + 1
+        else:
+            # 빈 행 중 가장 빠른 곳을 찾거나 데이터 끝에 추가 (최소 61행 보장)
+            actual_data_end = len([x for x in existing_dates if x.strip()])
+            row_num = max(actual_data_end + 1, 61)
+
+        # 1. 먼저 해당 줄을 비워서 데이터 꼬임 방지
+        target_range = f'H{row_num}:AX{row_num}'
+        raw_sheet.batch_clear([target_range]) 
+        
+        # 2. 깨끗해진 자리에 데이터 입력
+        raw_sheet.update(range_name=target_range, values=[final_row], value_input_option='USER_ENTERED')
+        
+        # 다음 루프를 위해 existing_dates 업데이트 (중복 행 생성 방지)
+        if curr_date not in existing_dates:
+            existing_dates.append(curr_date)
+            
+        print(f"✅ {curr_date} (Row {row_num}) 처리 완료")
 
 if __name__ == "__main__":
     URL = "https://docs.google.com/spreadsheets/d/13oY7i3IWz8npmWsbqC9h9DYJPjAR2XN5XO3R8jlIurk/edit"
