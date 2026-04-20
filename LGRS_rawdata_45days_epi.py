@@ -471,12 +471,12 @@ for name in all_ws_names:
     ws = sheets[name]
     data = payloads[name]
     if name == "M_NESM":
-        # M_NESM은 BA열(53번째 열)부터가 아니라, 보통 A열 티커 뒤인 B열부터 6개를 넣는 것이 관리상 편합니다.
-        # 질문하신 "BA부터"를 적용하려면 아래와 같이 범위를 지정합니다.
-        ws.batch_clear(["A2:A1000", "BA2:BL1000"]) 
+        # M_NESM은 CA열부터가 아니라, 보통 A열 티커 뒤인 C열부터 12개를 넣는 것이 관리상 편합니다.
+        # 질문하신 "CA부터"를 적용하려면 아래와 같이 범위를 지정합니다.
+        ws.batch_clear(["A2:A1000", "CA2:CL1000"]) 
         ws.update([[t] for t in tickers], f'A2:A{len(tickers)+1}')
-        # BF를 BL로 변경 (60~160 Max 6개 + 60~160 Min 6개 = 총 12개 열)
-        ws.update(data, f'BA2:BL{len(tickers)+1}')
+        # CF를 CL로 변경 (60~160 Max 6개 + 60~160 Min 6개 = 총 12개 열)
+        ws.update(data, f'CA2:CL{len(tickers)+1}')
     else:
         ticker_count = len(tickers)
 
