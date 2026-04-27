@@ -196,16 +196,30 @@ for ticker in tickers:
         close_yest = close.shift(1)
 
         # 1. 옵션 데이터 초기화
-        # [현재 코드 197라인 부근 수정 권장]
+        # 1. 주식 수 데이터 정밀 추출 및 대비 태세 구축
         try:
             tk_obj = yf.Ticker(ticker)
-            # info 가져오기 실패 시를 대비해 기본값 0 설정
-            shares = tk_obj.info.get('sharesOutstanding', 0) if tk_obj.info else 0
-        except Exception:
-            shares = 0 # 에러 발생 시 0으로 채워야 행 번호가 밀리지 않음
+            info = tk_obj.info if tk_obj.info else {}
+            
+            # 데이터 확보 (없을 경우 0으로 초기화)
+            f_sh = info.get('floatShares', 0)      # 유동 주식수
+            t_sh = info.get('sharesOutstanding', 0) # 발행 주식수
+            
+            # [H열 로직] 유동 주식수가 있으면 사용하되, 없으면 발행 주식수를 '최종 분모'로 선택
+            # 이는 시스템이 멈추지 않게 하는 '확률적 안전장치'입니다.
+            final_h = f_sh if f_sh > 0 else t_sh
+            
+        except Exception as e:
+            # 에러 발생 시에도 행 번호가 밀리지 않도록 0으로 채움
+            print(f"[{ticker}] 데이터 추출 중 오류 발생: {e}")
+            final_h = 0
+            f_sh = 0
+            t_sh = 0
 
-        # shares_payload에 [값] 형태로 추가 (update를 위해 2차원 리스트 구조)
-        shares_payload.append([shares])
+        # 2. 시트 레이아웃에 맞춰 페이로드 생성 (H: 최종, I: 유동, J: 발행)
+        # 이제 엑셀 수식은 H열을 보고, 사용자님은 I/J열을 보고 검증하시면 됩니다.
+        shares_payload.append([final_h, f_sh, t_sh])
+
 
         if df.empty or len(df) < 50:
             for name in all_ws_names:
@@ -508,18 +522,23 @@ for name in all_ws_names:
     time.sleep(1) # API Quota 방어
 
 
-# [최종 업데이트부] - 코드 가장 마지막 부분에 추가
+# [최종 업데이트부] - 수정된 로직
 try:
     ws_dw = sh.worksheet("Data_Warehouse")
     
     if shares_payload:
-        # H2부터 데이터 개수만큼 범위 지정 (예: H2:H37)
-        target_range = f"H2:H{len(shares_payload) + 1}"
+        # 데이터가 3개 열(H, I, J)이므로 범위를 J열까지 지정합니다.
+        # len(shares_payload) + 1은 데이터가 시작되는 2행부터의 끝 행 번호입니다.
+        target_range = f"H2:J{len(shares_payload) + 1}"
+        
+        # 가공 없이 shares_payload([final_h, f_sh, t_sh])를 그대로 쏩니다.
         ws_dw.update(shares_payload, target_range)
-        print(f"📊 Data_Warehouse 시트 H열 주식수 업데이트 완료 ({len(shares_payload)} 종목)")
+        
+        print(f"📊 Data_Warehouse 시트 H:J열 주식수 업데이트 완료 ({len(shares_payload)} 종목)")
+        print("   - H열: 최종 분모 / I열: 유동 주식수 / J열: 발행 주식수")
 
 except Exception as e:
-    print(f"🚨 Data_Warehouse 업데이트 중 오류 발생: {e}")    
+    print(f"🚨 Data_Warehouse 업데이트 중 오류 발생: {e}")
 
 # [최종 업데이트부 - 365라인 근처]
 # try:
