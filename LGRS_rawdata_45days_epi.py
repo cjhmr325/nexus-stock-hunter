@@ -219,7 +219,7 @@ for ticker in tickers:
         # 2. 시트 레이아웃에 맞춰 페이로드 생성 (H: 최종, I: 유동, J: 발행)
         # 이제 엑셀 수식은 H열을 보고, 사용자님은 I/J열을 보고 검증하시면 됩니다.
         shares_payload.append([final_h, f_sh, t_sh])
-
+        shares = final_h
 
         if df.empty or len(df) < 50:
             for name in all_ws_names:
